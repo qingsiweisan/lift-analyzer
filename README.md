@@ -1,6 +1,10 @@
 # Lift Analyzer - 力量举三大项动作分析工具
 
-基于 MediaPipe 姿态估计的力量举动作分析 CLI 工具，支持硬拉、深蹲、卧推的视频分析。
+基于姿态估计的力量举动作分析 CLI 工具，支持硬拉、深蹲、卧推的视频分析。
+
+支持两种后端：
+- **MediaPipe 2D** — 轻量级，CPU 即可运行，建议侧面拍摄
+- **WHAM 3D** — 基于 WHAM (CVPR 2024) 的 3D 姿态估计，角度不受拍摄角度影响，需要 GPU + WSL2
 
 ## 功能
 
@@ -9,7 +13,8 @@
 - **逐 Rep 评分** — 每个 rep 独立计算角度指标，给出 A/B/C 评级
 - **角度分析** — 膝关节、髋关节、肘关节、脊柱前倾等关键角度
 - **疲劳检测** — 对比首尾 rep 的动作质量变化
-- **可视化输出** — 骨骼标注视频、角度变化曲线图、关键帧截图
+- **可视化输出** — 骨骼标注视频、角度变化曲线图、杠铃轨迹图、速度曲线图
+- **3D 姿态估计** — WHAM 后端提供真实 3D 角度，不受拍摄角度影响
 - **中英双语报告**
 
 ## 各运动检测指标
@@ -52,7 +57,7 @@ pip install -r requirements.txt
 ### 3. 运行分析
 
 ```bash
-# 硬拉分析
+# 硬拉分析（默认 MediaPipe 2D）
 python analyze.py video.mp4 -t deadlift
 
 # 深蹲分析
@@ -60,6 +65,12 @@ python analyze.py video.mp4 -t squat
 
 # 卧推分析
 python analyze.py video.mp4 -t bench
+
+# 使用 WHAM 3D 后端（需要 WSL2 + GPU）
+python analyze.py video.mp4 -t deadlift --backend wham
+
+# 只生成报告和数据，不生成视频
+python analyze.py video.mp4 -t deadlift --backend wham --no-video
 ```
 
 ## 命令行参数
@@ -73,6 +84,8 @@ python analyze.py <video_path> [options]
 可选：
   -t, --type TYPE         运动类型（默认 deadlift）
   -o, --output DIR        输出目录（默认 视频同目录/<type>_analysis/）
+  --backend BACKEND       姿态估计后端：mediapipe（默认）或 wham
+  --barbell-model PATH    YOLOv8 杠铃检测模型路径（.pt）
   --no-video              不生成标注视频（加速处理）
   --no-chart              不生成角度变化图表
 ```
@@ -95,6 +108,8 @@ python analyze.py <video_path> [options]
 ├── report.txt          # 中英双语动作评估报告
 ├── frame_data.json     # 逐帧角度数据（可用于二次分析）
 ├── charts.png          # 角度随时间变化曲线图（含 rep 标记）
+├── bar_path.png        # 杠铃轨迹图（逐 rep 叠加）
+├── velocity.png        # 杠铃速度曲线（concentric/eccentric）
 └── frames/             # 关键帧截图（0%/25%/50%/75%/100%）
     ├── frame_0000.jpg
     ├── frame_0540.jpg
@@ -145,14 +160,16 @@ lift-analyzer/
 ├── analyze.py              # CLI 入口
 ├── requirements.txt        # Python 依赖
 ├── core/                   # 通用模块
-│   ├── angles.py           #   角度计算工具
+│   ├── angles.py           #   角度计算（2D + 3D 自动切换）
 │   ├── pose.py             #   MediaPipe 姿态提取封装
+│   ├── pose_3d.py          #   WHAM 3D 姿态提取（WSL2 桥接）
+│   ├── barbell.py          #   YOLOv8 杠铃检测（可选）
 │   ├── video.py            #   视频读写、关键帧采样
 │   ├── chart.py            #   matplotlib 角度曲线图
 │   └── reps.py             #   峰值检测 / Rep 计数
 ├── exercises/              # 运动分析器
-│   ├── base.py             #   分析器基类
-│   ├── deadlift.py         #   硬拉（含杠铃轨迹追踪）
+│   ├── base.py             #   分析器基类（2D/3D 统一流程）
+│   ├── deadlift.py         #   硬拉（含杠铃轨迹 + 速度曲线）
 │   ├── squat.py            #   深蹲（含膝盖内扣检测）
 │   └── bench.py            #   卧推（含左右对称性检测）
 └── .gitignore
@@ -163,17 +180,20 @@ lift-analyzer/
 ```
 视频输入
   │
-  ▼
-MediaPipe BlazePose (33个关键点)
+  ├── --backend mediapipe ──→ MediaPipe BlazePose (33个关键点, 2D)
+  │                            ├── 自动选择可见侧（左/右）
+  │                            └── 提取双侧关键点（对称性分析）
   │
-  ├── 自动选择可见侧（左/右）
-  ├── 提取双侧关键点（对称性分析）
+  ├── --backend wham ──→ WHAM (WSL2 GPU, 3D)
+  │                       ├── ViTPose 2D → DPVO → SMPL 3D mesh
+  │                       ├── 6890 vertices → J_regressor → 关键关节
+  │                       └── 真实 3D 坐标（米为单位）
   │
   ▼
 运动分析器 (deadlift/squat/bench)
   │
-  ├── 逐帧角度计算
-  ├── 杠铃追踪（手腕 Y 坐标）
+  ├── 逐帧角度计算（自动 2D/3D 切换）
+  ├── 杠铃追踪（手腕坐标 / YOLOv8 检测）
   ├── Rep 检测（峰值/谷值检测）
   ├── 逐 Rep 评分
   │
@@ -181,10 +201,65 @@ MediaPipe BlazePose (33个关键点)
 输出：标注视频 + 报告 + 图表 + JSON + 关键帧
 ```
 
+## 2D vs 3D 后端对比
+
+| | MediaPipe 2D | WHAM 3D |
+|---|---|---|
+| 硬件要求 | CPU 即可 | GPU + WSL2 (Linux) |
+| 拍摄角度 | 建议侧面 | 任意角度 |
+| 角度精度 | 受透视影响 | 真实 3D 角度 |
+| 杠铃轨迹 | 像素单位 (%) | 米为单位 |
+| 处理速度 | ~3 FPS (CPU) | ~1 FPS (GPU 推理) + 缓存 |
+| Rep 检测 | 侧面拍摄较准 | 任意角度均准 |
+
+## WHAM 3D 后端配置
+
+WHAM 后端需要在 WSL2 Ubuntu 中运行（Windows 上通过 `wsl.exe` 桥接调用）。
+
+### 前置要求
+
+- Windows 11 + WSL2 Ubuntu
+- NVIDIA GPU + CUDA（推荐 RTX 3060 以上）
+- WSL2 中安装 conda
+
+### 安装步骤
+
+```bash
+# 1. 在 WSL2 Ubuntu 中
+git clone --recursive https://github.com/yohanshin/WHAM.git
+cd WHAM
+
+# 2. 创建 conda 环境
+conda create -n wham python=3.9
+conda activate wham
+conda install pytorch==1.11.0 torchvision==0.12.0 torchaudio==0.11.0 cudatoolkit=11.3 -c pytorch
+
+# 3. 安装依赖（按 WHAM/docs/INSTALL.md）
+pip install -r requirements.txt
+# 安装 ViTPose, DPVO, mmcv 等
+
+# 4. 下载 SMPL 模型和预训练权重
+bash fetch_demo_data.sh
+
+# 5. 验证
+python demo.py --video examples/demo.mp4 --visualize
+```
+
+### 使用
+
+```bash
+# Windows 上运行（自动调用 WSL2 中的 WHAM）
+python analyze.py video.mp4 -t deadlift --backend wham
+
+# WHAM 输出会缓存，同一视频第二次运行秒出
+# 缓存位置：WSL2 中 /root/WHAM/output/lift_analyzer/<video_name>/
+```
+
 ## 已知局限
 
-- **2D 姿态估计** — 基于单目 2D 投影，拍摄角度会影响角度计算精度
-- **杠铃追踪** — 用手腕关键点近似，非直接识别杠铃
+- **2D 模式** — 基于单目 2D 投影，拍摄角度会影响角度计算精度（建议侧面拍摄）
+- **3D 模式** — 需要 WSL2 + GPU，首次推理较慢（~8 分钟/22s 视频），缓存后秒出
+- **杠铃追踪** — 用手腕关键点近似，可通过 `--barbell-model` 指定 YOLOv8 模型提升精度
 - **单人场景** — 画面中如有多人可能影响检测
 - **脊柱分析** — 只能用肩-髋连线估算前倾，无法检测脊柱弯曲弧度
 

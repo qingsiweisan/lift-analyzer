@@ -2,7 +2,7 @@
 
 import cv2
 import numpy as np
-from core.angles import calculate_angle, spine_inclination
+from core.angles import calculate_angle, spine_inclination, auto_angle, auto_spine_inclination
 from core.reps import detect_reps
 from exercises.base import ExerciseAnalyzer
 
@@ -18,21 +18,44 @@ class DeadliftAnalyzer(ExerciseAnalyzer):
         ankle = points["ankle"]
         wrist = points["wrist"]
 
-        knee_angle = calculate_angle(hip, knee, ankle)
-        hip_angle = calculate_angle(shoulder, hip, knee)
-        back_angle = spine_inclination(shoulder, hip)
-        bar_drift = abs(shoulder[0] - ankle[0]) / width * 100
+        knee_angle = auto_angle(hip, knee, ankle)
+        hip_angle = auto_angle(shoulder, hip, knee)
+        back_angle = auto_spine_inclination(shoulder, hip)
 
-        # Barbell tracking: use wrist Y position (normalized, 0=top 100=bottom)
-        # In image coords, y increases downward, so higher bar = smaller y
-        bar_y = wrist[1] / height * 100  # 0% = top of frame, 100% = bottom
+        # Detect 3D mode: z != 0 means WHAM 3D coordinates (meters)
+        is_3d = len(shoulder) >= 3 and shoulder[2] != 0.0
 
-        # Also track both wrists for bar path visualization
-        left_wrist = both_sides["left"]["wrist"]
-        right_wrist = both_sides["right"]["wrist"]
-        # Average of both wrists as bar center
-        bar_center_x = (left_wrist[0] + right_wrist[0]) / 2
-        bar_center_y = (left_wrist[1] + right_wrist[1]) / 2
+        if is_3d:
+            # 3D mode: coordinates are in meters
+            # bar_drift: horizontal distance shoulder-to-ankle in meters
+            bar_drift = abs(shoulder[0] - ankle[0])
+            # bar_y: wrist Y in meters (lower = more negative in SMPL convention)
+            # We use raw Y so rep detection works on the actual trajectory
+            left_wrist = both_sides["left"]["wrist"]
+            right_wrist = both_sides["right"]["wrist"]
+            bar_center_x = (left_wrist[0] + right_wrist[0]) / 2
+            bar_center_y = (left_wrist[1] + right_wrist[1]) / 2
+            bar_y = bar_center_y  # meters, raw
+            bar_x_px = bar_center_x  # meters, raw
+            bar_y_px = bar_center_y  # meters, raw
+        else:
+            # 2D mode: pixel coordinates
+            bar_drift = abs(shoulder[0] - ankle[0]) / width * 100
+
+            bar_det = points.get("_bar_detected")
+            if bar_det and bar_det.get("source") == "yolo":
+                bar_center_x = bar_det["x"]
+                bar_center_y = bar_det["y"]
+                bar_y = bar_center_y / height * 100
+            else:
+                bar_y = wrist[1] / height * 100
+                left_wrist = both_sides["left"]["wrist"]
+                right_wrist = both_sides["right"]["wrist"]
+                bar_center_x = (left_wrist[0] + right_wrist[0]) / 2
+                bar_center_y = (left_wrist[1] + right_wrist[1]) / 2
+
+            bar_x_px = bar_center_x
+            bar_y_px = bar_center_y
 
         return {
             "knee_angle": knee_angle,
@@ -40,35 +63,41 @@ class DeadliftAnalyzer(ExerciseAnalyzer):
             "back_angle": back_angle,
             "bar_drift": bar_drift,
             "bar_y": bar_y,
-            "bar_x_px": bar_center_x,
-            "bar_y_px": bar_center_y,
+            "bar_x_px": bar_x_px,
+            "bar_y_px": bar_y_px,
+            "_is_3d": is_3d,
         }
 
     def draw_overlay(self, frame, points, angle_data, width, height):
-        shoulder = points["shoulder"]
-        hip = points["hip"]
-        knee = points["knee"]
-        wrist = points["wrist"]
+        # In 3D mode, we don't have pixel coordinates for joint positions,
+        # so only draw text overlay (no skeleton/joint markers)
+        is_3d = angle_data.get("_is_3d", False)
 
-        for pt, color in [(shoulder, (255, 0, 0)), (hip, (0, 255, 0)),
-                          (knee, (0, 0, 255)), (points["ankle"], (255, 255, 0))]:
-            cv2.circle(frame, (int(pt[0]), int(pt[1])), 8, color, -1)
+        if not is_3d:
+            shoulder = points["shoulder"]
+            hip = points["hip"]
+            knee = points["knee"]
+            wrist = points["wrist"]
 
-        # Highlight wrist/bar position with a larger marker
-        cv2.circle(frame, (int(wrist[0]), int(wrist[1])), 10, (0, 255, 255), 3)
-        cv2.putText(frame, "BAR", (int(wrist[0]) + 12, int(wrist[1]) - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            for pt, color in [(shoulder, (255, 0, 0)), (hip, (0, 255, 0)),
+                              (knee, (0, 0, 255)), (points["ankle"], (255, 255, 0))]:
+                cv2.circle(frame, (int(pt[0]), int(pt[1])), 8, color, -1)
 
-        cv2.putText(frame, f"Knee: {angle_data['knee_angle']:.0f}",
-                    (int(knee[0]) + 10, int(knee[1])),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-        cv2.putText(frame, f"Hip: {angle_data['hip_angle']:.0f}",
-                    (int(hip[0]) + 10, int(hip[1])),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(frame, f"Back: {angle_data['back_angle']:.0f}",
-                    (int(shoulder[0]) + 10, int(shoulder[1]) - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            cv2.circle(frame, (int(wrist[0]), int(wrist[1])), 10, (0, 255, 255), 3)
+            cv2.putText(frame, "BAR", (int(wrist[0]) + 12, int(wrist[1]) - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
+            cv2.putText(frame, f"Knee: {angle_data['knee_angle']:.0f}",
+                        (int(knee[0]) + 10, int(knee[1])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.putText(frame, f"Hip: {angle_data['hip_angle']:.0f}",
+                        (int(hip[0]) + 10, int(hip[1])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(frame, f"Back: {angle_data['back_angle']:.0f}",
+                        (int(shoulder[0]) + 10, int(shoulder[1]) - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+        # Text overlay (works for both 2D and 3D)
         ba = angle_data["back_angle"]
         if ba > 45:
             color, text = (0, 0, 255), "WARNING: Excessive forward lean!"
@@ -78,26 +107,46 @@ class DeadliftAnalyzer(ExerciseAnalyzer):
             color, text = (0, 255, 0), "Good back position"
         cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
+        if is_3d:
+            # Draw angle values in fixed positions for 3D mode
+            y_pos = 80
+            for label, key, clr in [("Knee", "knee_angle", (0, 0, 255)),
+                                     ("Hip", "hip_angle", (0, 255, 0)),
+                                     ("Back", "back_angle", (255, 0, 0))]:
+                cv2.putText(frame, f"{label}: {angle_data[key]:.0f} deg",
+                            (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, clr, 2)
+                y_pos += 35
+
     def generate_report(self, all_angle_data, frame_data, fps, duration):
         knee = all_angle_data["knee_angle"]
         hip = all_angle_data["hip_angle"]
         back = all_angle_data["back_angle"]
         bar_y = all_angle_data["bar_y"]
 
-        # --- Rep detection using barbell Y position ---
-        # bar_y: 0=top, 100=bottom. A lockout = bar at its highest = bar_y valley
-        # So we detect valleys in bar_y to find lockout moments
-        reps_info = detect_reps(bar_y, mode="valley", min_prominence=8,
-                                min_distance_sec=2.0, fps=fps)
+        # Detect 3D mode from frame data
+        is_3d = any(fd.get("backend") == "wham" for fd in frame_data) if frame_data else False
 
-        # Filter out incomplete reps: bar must move at least 15% of frame height
+        # --- Rep detection using barbell Y position ---
+        # 3D: bar_y is in meters (negative Y = higher). Valleys = lockout (highest point).
+        # 2D: bar_y is % of frame (0=top, 100=bottom). Valleys = lockout.
+        if is_3d:
+            # In SMPL coords, Y is vertical (negative = up). Lockout = most negative Y.
+            # detect_reps valley mode finds minima.
+            reps_info = detect_reps(bar_y, mode="valley", min_prominence=0.1,
+                                    min_distance_sec=2.0, fps=fps)
+            min_travel = 0.15  # 15cm minimum bar travel for a valid rep
+        else:
+            reps_info = detect_reps(bar_y, mode="valley", min_prominence=8,
+                                    min_distance_sec=2.0, fps=fps)
+            min_travel = 15  # 15% of frame height
+
         valid_reps = []
         for start, peak, end in reps_info["rep_ranges"]:
             rep_bar = bar_y[start:end + 1]
             if not rep_bar:
                 continue
             bar_travel = max(rep_bar) - min(rep_bar)
-            if bar_travel >= 15:  # at least 15% of frame height movement
+            if bar_travel >= min_travel:
                 valid_reps.append((start, peak, end))
 
         rep_count = len(valid_reps)
@@ -138,7 +187,12 @@ class DeadliftAnalyzer(ExerciseAnalyzer):
 
                 grade = self._grade_rep(r_hip_rom, r_max_back, r_lockout_hip)
 
-                lines.append(f"  #{i+1:>2}  {r_time:>6.1f}s  {r_bar_travel:>8.1f}%"
+                if is_3d:
+                    travel_str = f"{r_bar_travel:>7.2f}m"
+                else:
+                    travel_str = f"{r_bar_travel:>8.1f}%"
+
+                lines.append(f"  #{i+1:>2}  {r_time:>6.1f}s  {travel_str}"
                              f"  {r_hip_rom:>6.0f} deg  {r_max_back:>7.0f} deg"
                              f"  {r_lockout_hip:>6.0f} deg  {grade:>6}")
 
@@ -148,8 +202,13 @@ class DeadliftAnalyzer(ExerciseAnalyzer):
         bar_y_px = all_angle_data["bar_y_px"]
         bar_x_px = all_angle_data["bar_x_px"]
         lines.append("--- BAR PATH / 杠铃轨迹 ---")
-        lines.append(f"  Bar Y range: {min(bar_y):.1f}% ~ {max(bar_y):.1f}% of frame")
-        lines.append(f"  Bar X drift: {max(bar_x_px) - min(bar_x_px):.0f} px horizontal")
+        if is_3d:
+            lines.append(f"  Bar Y range: {min(bar_y):.3f}m ~ {max(bar_y):.3f}m")
+            bar_x_range = max(bar_x_px) - min(bar_x_px)
+            lines.append(f"  Bar X drift: {bar_x_range:.3f}m horizontal")
+        else:
+            lines.append(f"  Bar Y range: {min(bar_y):.1f}% ~ {max(bar_y):.1f}% of frame")
+            lines.append(f"  Bar X drift: {max(bar_x_px) - min(bar_x_px):.0f} px horizontal")
         lines.append("")
 
         # --- Overall angle ranges ---
@@ -208,11 +267,18 @@ class DeadliftAnalyzer(ExerciseAnalyzer):
 
         # Bar path straightness
         bar_x_range = max(bar_x_px) - min(bar_x_px)
-        if bar_x_range < 50:
-            good.append(f"  [OK] 杠铃轨迹较直 (水平漂移 {bar_x_range:.0f} px)")
+        if is_3d:
+            if bar_x_range < 0.05:  # 5cm
+                good.append(f"  [OK] 杠铃轨迹较直 (水平漂移 {bar_x_range:.2f}m)")
+            else:
+                issues.append(f"  [~] 杠铃轨迹水平漂移较大 ({bar_x_range:.2f}m)")
+                issues.append("      建议：注意杠铃贴身运动，避免前后漂移")
         else:
-            issues.append(f"  [~] 杠铃轨迹水平漂移较大 ({bar_x_range:.0f} px)")
-            issues.append("      建议：注意杠铃贴身运动，避免前后漂移")
+            if bar_x_range < 50:
+                good.append(f"  [OK] 杠铃轨迹较直 (水平漂移 {bar_x_range:.0f} px)")
+            else:
+                issues.append(f"  [~] 杠铃轨迹水平漂移较大 ({bar_x_range:.0f} px)")
+                issues.append("      建议：注意杠铃贴身运动，避免前后漂移")
 
         if good:
             lines.append("  优点:")
@@ -225,8 +291,12 @@ class DeadliftAnalyzer(ExerciseAnalyzer):
 
         lines.append("")
         lines.append("=" * 60)
-        lines.append("注意：基于2D姿态估计+手腕追踪，结果受拍摄角度影响。")
-        lines.append("建议侧面拍摄以获得最佳分析效果。")
+        if is_3d:
+            lines.append("基于WHAM 3D姿态估计，角度不受拍摄角度影响。")
+            lines.append("杠铃位置基于手腕3D坐标近似。")
+        else:
+            lines.append("注意：基于2D姿态估计+手腕追踪，结果受拍摄角度影响。")
+            lines.append("建议侧面拍摄以获得最佳分析效果。")
         lines.append("=" * 60)
         return "\n".join(lines)
 
@@ -258,12 +328,44 @@ class DeadliftAnalyzer(ExerciseAnalyzer):
         bar_y = all_angle_data.get("bar_y", [])
         if not bar_y:
             return None
-        reps_info = detect_reps(bar_y, mode="valley", min_prominence=8,
-                                min_distance_sec=2.0, fps=fps)
-        # Filter by bar travel
+
+        # Detect 3D mode: bar_y values in meters are small (< 5)
+        is_3d = all(abs(v) < 5 for v in bar_y)
+        if is_3d:
+            reps_info = detect_reps(bar_y, mode="valley", min_prominence=0.1,
+                                    min_distance_sec=2.0, fps=fps)
+            min_travel = 0.15
+        else:
+            reps_info = detect_reps(bar_y, mode="valley", min_prominence=8,
+                                    min_distance_sec=2.0, fps=fps)
+            min_travel = 15
+
         valid_peaks = []
         for start, peak, end in reps_info["rep_ranges"]:
             rep_bar = bar_y[start:end + 1]
-            if rep_bar and (max(rep_bar) - min(rep_bar)) >= 15:
+            if rep_bar and (max(rep_bar) - min(rep_bar)) >= min_travel:
                 valid_peaks.append(peak)
         return valid_peaks if valid_peaks else None
+
+    def get_rep_ranges(self, all_angle_data, fps):
+        """Return (start, peak, end) tuples for bar path / velocity charts."""
+        bar_y = all_angle_data.get("bar_y", [])
+        if not bar_y:
+            return None
+
+        is_3d = all(abs(v) < 5 for v in bar_y)
+        if is_3d:
+            reps_info = detect_reps(bar_y, mode="valley", min_prominence=0.1,
+                                    min_distance_sec=2.0, fps=fps)
+            min_travel = 0.15
+        else:
+            reps_info = detect_reps(bar_y, mode="valley", min_prominence=8,
+                                    min_distance_sec=2.0, fps=fps)
+            min_travel = 15
+
+        valid = []
+        for start, peak, end in reps_info["rep_ranges"]:
+            rep_bar = bar_y[start:end + 1]
+            if rep_bar and (max(rep_bar) - min(rep_bar)) >= min_travel:
+                valid.append((start, peak, end))
+        return valid if valid else None

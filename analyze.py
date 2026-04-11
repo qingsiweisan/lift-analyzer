@@ -4,12 +4,12 @@ Lift Analyzer - Powerlifting Form Analysis CLI Tool
 
 Usage:
     python analyze.py <video_path> --type deadlift
-    python analyze.py <video_path> --type squat
-    python analyze.py <video_path> --type bench
+    python analyze.py <video_path> --type squat --backend wham
+    python analyze.py <video_path> --type bench --barbell-model barbell.pt
 
 Examples:
     python analyze.py my_deadlift.mp4 -t deadlift
-    python analyze.py squat_video.mp4 -t squat -o ./results
+    python analyze.py squat_video.mp4 -t squat -o ./results --backend wham
     python analyze.py bench.mp4 -t bench --no-video
 """
 
@@ -53,10 +53,14 @@ Exercise types / 运动类型:
   squat    (sq, 深蹲)  - Squat form analysis
   bench    (bp, 卧推)  - Bench press form analysis
 
+Backends / 姿态估计后端:
+  mediapipe  - 2D pose (default, no GPU needed)
+  wham       - 3D pose (requires CUDA GPU, higher accuracy)
+
 Examples:
   python analyze.py video.mp4 -t deadlift
-  python analyze.py video.mp4 -t 深蹲 -o ./output
-  python analyze.py video.mp4 -t bp --no-video
+  python analyze.py video.mp4 -t 深蹲 --backend wham
+  python analyze.py video.mp4 -t bp --barbell-model barbell.pt
         """,
     )
     parser.add_argument("video", help="Path to the video file / 视频文件路径")
@@ -64,6 +68,10 @@ Examples:
                         help="Exercise type: deadlift/squat/bench (default: deadlift)")
     parser.add_argument("-o", "--output", default=None,
                         help="Output directory (default: <video_dir>/<type>_analysis/)")
+    parser.add_argument("--backend", default="mediapipe", choices=["mediapipe", "wham"],
+                        help="Pose estimation backend (default: mediapipe)")
+    parser.add_argument("--barbell-model", default=None,
+                        help="Path to YOLOv8 barbell detection model (.pt)")
     parser.add_argument("--no-video", action="store_true",
                         help="Skip annotated video generation (faster)")
     parser.add_argument("--no-chart", action="store_true",
@@ -92,13 +100,16 @@ Examples:
 
     # Run analysis
     analyzer = ANALYZERS[exercise_type]()
+    backend_label = "WHAM 3D" if args.backend == "wham" else "MediaPipe 2D"
     print(f"{'='*60}")
     print(f"  Lift Analyzer - {analyzer.exercise_name_cn} ({analyzer.exercise_name})")
     print(f"{'='*60}")
-    print(f"  Video:  {args.video}")
-    print(f"  Output: {output_dir}")
-    print(f"  Video:  {'ON' if not args.no_video else 'OFF'}")
-    print(f"  Chart:  {'ON' if not args.no_chart else 'OFF'}")
+    print(f"  Video:    {args.video}")
+    print(f"  Output:   {output_dir}")
+    print(f"  Backend:  {backend_label}")
+    print(f"  Barbell:  {args.barbell_model or 'wrist approximation'}")
+    print(f"  Video:    {'ON' if not args.no_video else 'OFF'}")
+    print(f"  Chart:    {'ON' if not args.no_chart else 'OFF'}")
     print(f"{'='*60}")
     print()
 
@@ -107,6 +118,8 @@ Examples:
         output_dir=output_dir,
         generate_video=not args.no_video,
         generate_charts=not args.no_chart,
+        backend=args.backend,
+        barbell_model=args.barbell_model,
     )
 
 

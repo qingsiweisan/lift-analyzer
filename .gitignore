@@ -17,3 +17,5 @@ output/
 *.egg-info/
 dist/
 build/
+models/
+*.pt

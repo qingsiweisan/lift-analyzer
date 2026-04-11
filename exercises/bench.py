@@ -2,7 +2,7 @@
 
 import cv2
 import numpy as np
-from core.angles import calculate_angle, spine_inclination, vertical_offset, symmetry_ratio
+from core.angles import calculate_angle, spine_inclination, vertical_offset, symmetry_ratio, auto_angle, auto_spine_inclination
 from core.reps import detect_reps
 from exercises.base import ExerciseAnalyzer
 
@@ -18,13 +18,16 @@ class BenchAnalyzer(ExerciseAnalyzer):
         hip = points["hip"]
 
         # Elbow angle: shoulder-elbow-wrist
-        elbow_angle = calculate_angle(shoulder, elbow, wrist)
+        elbow_angle = auto_angle(shoulder, elbow, wrist)
 
         # Shoulder angle: elbow-shoulder-hip (arm flare)
-        shoulder_angle = calculate_angle(elbow, shoulder, hip)
+        shoulder_angle = auto_angle(elbow, shoulder, hip)
 
         # Back arch: spine inclination (how much the torso lifts off bench)
-        back_arch = spine_inclination(shoulder, hip)
+        back_arch = auto_spine_inclination(shoulder, hip)
+
+        # Detect 3D mode
+        is_3d = len(shoulder) >= 3 and shoulder[2] != 0.0
 
         # Symmetry: compare left/right elbow heights and wrist heights
         left = both_sides["left"]
@@ -38,25 +41,29 @@ class BenchAnalyzer(ExerciseAnalyzer):
             "back_arch": back_arch,
             "elbow_symmetry": elbow_sym,
             "wrist_symmetry": wrist_sym,
+            "_is_3d": is_3d,
         }
 
     def draw_overlay(self, frame, points, angle_data, width, height):
-        shoulder = points["shoulder"]
-        elbow = points["elbow"]
-        wrist = points["wrist"]
+        is_3d = angle_data.get("_is_3d", False)
 
-        for pt, color in [(shoulder, (255, 0, 0)), (elbow, (0, 255, 0)),
-                          (wrist, (0, 0, 255))]:
-            cv2.circle(frame, (int(pt[0]), int(pt[1])), 8, color, -1)
+        if not is_3d:
+            shoulder = points["shoulder"]
+            elbow = points["elbow"]
+            wrist = points["wrist"]
 
-        cv2.putText(frame, f"Elbow: {angle_data['elbow_angle']:.0f}",
-                    (int(elbow[0]) + 10, int(elbow[1])),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(frame, f"Shoulder: {angle_data['shoulder_angle']:.0f}",
-                    (int(shoulder[0]) + 10, int(shoulder[1]) - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            for pt, color in [(shoulder, (255, 0, 0)), (elbow, (0, 255, 0)),
+                              (wrist, (0, 0, 255))]:
+                cv2.circle(frame, (int(pt[0]), int(pt[1])), 8, color, -1)
 
-        # Elbow angle status
+            cv2.putText(frame, f"Elbow: {angle_data['elbow_angle']:.0f}",
+                        (int(elbow[0]) + 10, int(elbow[1])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(frame, f"Shoulder: {angle_data['shoulder_angle']:.0f}",
+                        (int(shoulder[0]) + 10, int(shoulder[1]) - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+        # Elbow angle status (works for both 2D and 3D)
         ea = angle_data["elbow_angle"]
         if ea < 90:
             color, text = (0, 255, 0), "Good depth - full ROM"
@@ -66,12 +73,22 @@ class BenchAnalyzer(ExerciseAnalyzer):
             color, text = (0, 0, 255), "Limited ROM"
         cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
+        if is_3d:
+            y_pos = 80
+            for label, key, clr in [("Elbow", "elbow_angle", (0, 255, 0)),
+                                     ("Shoulder", "shoulder_angle", (255, 0, 0))]:
+                cv2.putText(frame, f"{label}: {angle_data[key]:.0f} deg",
+                            (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, clr, 2)
+                y_pos += 35
+
     def generate_report(self, all_angle_data, frame_data, fps, duration):
         elbow = all_angle_data["elbow_angle"]
         shoulder = all_angle_data["shoulder_angle"]
         back = all_angle_data["back_arch"]
         e_sym = all_angle_data.get("elbow_symmetry", [1.0])
         w_sym = all_angle_data.get("wrist_symmetry", [1.0])
+
+        is_3d = any(fd.get("backend") == "wham" for fd in frame_data) if frame_data else False
 
         min_elbow_idx = int(np.argmin(elbow))
         max_elbow_idx = int(np.argmax(elbow))
@@ -147,8 +164,11 @@ class BenchAnalyzer(ExerciseAnalyzer):
 
         lines.append("")
         lines.append("=" * 60)
-        lines.append("注意：基于2D姿态估计，结果受拍摄角度影响。")
-        lines.append("建议从侧面或斜上方45度拍摄卧推。正面拍摄可检测对称性。")
+        if is_3d:
+            lines.append("基于WHAM 3D姿态估计，角度不受拍摄角度影响。")
+        else:
+            lines.append("注意：基于2D姿态估计，结果受拍摄角度影响。")
+            lines.append("建议从侧面或斜上方45度拍摄卧推。正面拍摄可检测对称性。")
         lines.append("=" * 60)
         return "\n".join(lines)
 

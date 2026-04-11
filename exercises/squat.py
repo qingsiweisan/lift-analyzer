@@ -2,7 +2,7 @@
 
 import cv2
 import numpy as np
-from core.angles import calculate_angle, spine_inclination, horizontal_offset
+from core.angles import calculate_angle, spine_inclination, horizontal_offset, auto_angle, auto_spine_inclination
 from core.reps import detect_reps
 from exercises.base import ExerciseAnalyzer
 
@@ -17,16 +17,19 @@ class SquatAnalyzer(ExerciseAnalyzer):
         knee = points["knee"]
         ankle = points["ankle"]
 
-        knee_angle = calculate_angle(hip, knee, ankle)
-        hip_angle = calculate_angle(shoulder, hip, knee)
-        back_angle = spine_inclination(shoulder, hip)
+        knee_angle = auto_angle(hip, knee, ankle)
+        hip_angle = auto_angle(shoulder, hip, knee)
+        back_angle = auto_spine_inclination(shoulder, hip)
+
+        # Detect 3D mode
+        is_3d = len(shoulder) >= 3 and shoulder[2] != 0.0
 
         # Knee valgus: compare knee-ankle horizontal offset (both sides)
         left = both_sides["left"]
         right = both_sides["right"]
         l_valgus = left["knee"][0] - left["ankle"][0]  # positive = knee inside
         r_valgus = right["ankle"][0] - right["knee"][0]
-        knee_valgus = (l_valgus + r_valgus) / 2  # avg inward drift in pixels
+        knee_valgus = (l_valgus + r_valgus) / 2
 
         # Knee over toe: horizontal distance between knee and foot_index
         knee_over_toe = knee[0] - points.get("foot_index", ankle)[0]
@@ -36,29 +39,33 @@ class SquatAnalyzer(ExerciseAnalyzer):
             "hip_angle": hip_angle,
             "back_angle": back_angle,
             "knee_valgus_px": knee_valgus,
+            "_is_3d": is_3d,
         }
 
     def draw_overlay(self, frame, points, angle_data, width, height):
-        shoulder = points["shoulder"]
-        hip = points["hip"]
-        knee = points["knee"]
-        ankle = points["ankle"]
+        is_3d = angle_data.get("_is_3d", False)
 
-        for pt, color in [(shoulder, (255, 0, 0)), (hip, (0, 255, 0)),
-                          (knee, (0, 0, 255)), (ankle, (255, 255, 0))]:
-            cv2.circle(frame, (int(pt[0]), int(pt[1])), 8, color, -1)
+        if not is_3d:
+            shoulder = points["shoulder"]
+            hip = points["hip"]
+            knee = points["knee"]
+            ankle = points["ankle"]
 
-        cv2.putText(frame, f"Knee: {angle_data['knee_angle']:.0f}",
-                    (int(knee[0]) + 10, int(knee[1])),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-        cv2.putText(frame, f"Hip: {angle_data['hip_angle']:.0f}",
-                    (int(hip[0]) + 10, int(hip[1])),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(frame, f"Back: {angle_data['back_angle']:.0f}",
-                    (int(shoulder[0]) + 10, int(shoulder[1]) - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            for pt, color in [(shoulder, (255, 0, 0)), (hip, (0, 255, 0)),
+                              (knee, (0, 0, 255)), (ankle, (255, 255, 0))]:
+                cv2.circle(frame, (int(pt[0]), int(pt[1])), 8, color, -1)
 
-        # Depth indicator
+            cv2.putText(frame, f"Knee: {angle_data['knee_angle']:.0f}",
+                        (int(knee[0]) + 10, int(knee[1])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.putText(frame, f"Hip: {angle_data['hip_angle']:.0f}",
+                        (int(hip[0]) + 10, int(hip[1])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(frame, f"Back: {angle_data['back_angle']:.0f}",
+                        (int(shoulder[0]) + 10, int(shoulder[1]) - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+        # Depth indicator (works for both 2D and 3D)
         ka = angle_data["knee_angle"]
         if ka <= 90:
             color, text = (0, 255, 0), "Good depth!"
@@ -68,11 +75,22 @@ class SquatAnalyzer(ExerciseAnalyzer):
             color, text = (0, 0, 255), "Above parallel"
         cv2.putText(frame, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
+        if is_3d:
+            y_pos = 80
+            for label, key, clr in [("Knee", "knee_angle", (0, 0, 255)),
+                                     ("Hip", "hip_angle", (0, 255, 0)),
+                                     ("Back", "back_angle", (255, 0, 0))]:
+                cv2.putText(frame, f"{label}: {angle_data[key]:.0f} deg",
+                            (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, clr, 2)
+                y_pos += 35
+
     def generate_report(self, all_angle_data, frame_data, fps, duration):
         knee = all_angle_data["knee_angle"]
         hip = all_angle_data["hip_angle"]
         back = all_angle_data["back_angle"]
         valgus = all_angle_data.get("knee_valgus_px", [0])
+
+        is_3d = any(fd.get("backend") == "wham" for fd in frame_data) if frame_data else False
 
         min_knee_idx = int(np.argmin(knee))
 
@@ -112,13 +130,24 @@ class SquatAnalyzer(ExerciseAnalyzer):
 
         # Knee valgus
         max_valgus = max(valgus) if valgus else 0
-        if max_valgus > 30:
-            issues.append(f"  [!] 膝盖内扣明显 (max {max_valgus:.0f} px)")
-            issues.append("      建议：加强臀中肌，练习弹力带深蹲")
-        elif max_valgus > 15:
-            issues.append(f"  [~] 轻微膝盖内扣 ({max_valgus:.0f} px)")
+        if is_3d:
+            # 3D: valgus in meters
+            if max_valgus > 0.05:  # 5cm
+                issues.append(f"  [!] 膝盖内扣明显 (max {max_valgus:.2f}m)")
+                issues.append("      建议：加强臀中肌，练习弹力带深蹲")
+            elif max_valgus > 0.02:  # 2cm
+                issues.append(f"  [~] 轻微膝盖内扣 ({max_valgus:.2f}m)")
+            else:
+                good.append("  [OK] 膝盖跟踪良好，无明显内扣")
         else:
-            good.append("  [OK] 膝盖跟踪良好，无明显内扣")
+            # 2D: valgus in pixels
+            if max_valgus > 30:
+                issues.append(f"  [!] 膝盖内扣明显 (max {max_valgus:.0f} px)")
+                issues.append("      建议：加强臀中肌，练习弹力带深蹲")
+            elif max_valgus > 15:
+                issues.append(f"  [~] 轻微膝盖内扣 ({max_valgus:.0f} px)")
+            else:
+                good.append("  [OK] 膝盖跟踪良好，无明显内扣")
 
         # Back angle (Good morning squat check)
         max_back = max(back)
@@ -141,8 +170,12 @@ class SquatAnalyzer(ExerciseAnalyzer):
 
         lines.append("")
         lines.append("=" * 60)
-        lines.append("注意：基于2D姿态估计，结果受拍摄角度影响。建议侧面拍摄。")
-        lines.append("正面拍摄可更好检测膝盖内扣。")
+        if is_3d:
+            lines.append("基于WHAM 3D姿态估计，角度不受拍摄角度影响。")
+            lines.append("膝盖内扣基于3D坐标检测。")
+        else:
+            lines.append("注意：基于2D姿态估计，结果受拍摄角度影响。建议侧面拍摄。")
+            lines.append("正面拍摄可更好检测膝盖内扣。")
         lines.append("=" * 60)
         return "\n".join(lines)
 
